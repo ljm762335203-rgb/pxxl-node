@@ -5,11 +5,14 @@
 const fs = require("fs");
 const path = require("path");
 const http = require("http");
+const net = require("net");
+const os = require("os");
 const { spawn } = require("child_process");
 
 const PORT = parseInt(process.env.PORT || "8080", 10);
+const XRAY_PORT = 10001;
 const BIN = path.join(__dirname, "bin", "xray");
-const CFG = path.join(__dirname, "config.json");
+const CFG = path.join(os.tmpdir(), "config.json");
 
 const uuid = process.env.UUID || process.env.APP_KEY;
 const wspath = process.env.WSPATH || "/ws";
@@ -21,8 +24,8 @@ if (!uuid) {
 const config = {
   log: { loglevel: "warning" },
   inbounds: [{
-    port: PORT,
-    listen: "0.0.0.0",
+    port: XRAY_PORT,
+    listen: "127.0.0.1",
     protocol: "vless",
     settings: { clients: [{ id: uuid, level: 0 }], decryption: "none" },
     streamSettings: {
@@ -49,9 +52,15 @@ const server = http.createServer((req, res) => {
 server.on("upgrade", (req, socket, head) => {
   const url = new URL(req.url, "http://localhost");
   if (url.pathname === wspath) {
-    xray.stdin?.write?.("");
-    socket.write("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n");
-    socket.on("data", () => {});
+    const upstream = net.connect(XRAY_PORT, "127.0.0.1", () => {
+      const headers = Object.entries(req.headers).map(([k, v]) => `${k}: ${v}`).join("\r\n");
+      upstream.write(`${req.method} ${req.url} HTTP/1.1\r\n${headers}\r\n\r\n`);
+      if (head && head.length) upstream.write(head);
+      socket.pipe(upstream);
+      upstream.pipe(socket);
+    });
+    upstream.on("error", () => socket.destroy());
+    socket.on("error", () => upstream.destroy());
   } else {
     socket.destroy();
   }
@@ -69,5 +78,5 @@ xray.on("exit", (code, signal) => {
 
 server.listen(PORT, "0.0.0.0", () => {
   console.log(`[server] listening on 0.0.0.0:${PORT}`);
-  console.log(`[server] xray core starting on port ${PORT} (ws path ${wspath})`);
+  console.log(`[server] xray core starting on internal port ${XRAY_PORT} (ws path ${wspath})`);
 });
